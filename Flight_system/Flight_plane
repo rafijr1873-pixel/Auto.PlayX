@@ -1,6 +1,6 @@
 --=====================================================================
--- JET FIGHTER FLIGHT SYSTEM (MOBILE/TOUCH) - Character-based v2
--- Fix: control layout baru + bug fix + speed lebih realistis
+-- JET FIGHTER FLIGHT SYSTEM (MOBILE/TOUCH) - Character-based v2.1
+-- Update: Yaw/Pitch lebih responsif + Kamera simple smooth TPS
 -- LocalScript - taruh di StarterPlayerScripts
 --=====================================================================
 
@@ -19,14 +19,13 @@ local Config = {
 	Mass    = 1,
 	Gravity = 70,
 
-	-- Throttle / Thrust (throttle = satu-satunya sumber kecepatan maju)
-	MaxThrust            = 1600,
-	ThrottleChangeRate   = 0.9,   -- seberapa cepat slider throttle merespon drag jari
+	-- Throttle / Thrust
+	MaxThrust = 1600,
 
-	-- Kecepatan (DIKURANGI biar gak kenceng banget)
+	-- Kecepatan
 	MaxSpeed   = 220,
 	StallSpeed = 55,
-	MinFlightSpeed = 15, -- kecepatan minimum "idle" biar gak diam total
+	MinFlightSpeed = 15,
 
 	-- Boost (tap sekali -> aktif otomatis -> cooldown)
 	BoostThrustMultiplier = 2.2,
@@ -41,31 +40,26 @@ local Config = {
 	CriticalAoA            = 20,
 	StallAoA               = 32,
 
-	-- Kontrol rotasi (derajat/detik)
-	MaxPitchRate        = 45,
-	MaxYawRate          = 30,
-	MaxRollRate         = 150,
-	RollButtonRate      = 150, -- kekuatan tombol roll manual
-	AngularAcceleration = 200,
+	-- ===== Kontrol rotasi (DIPERCEPAT biar gak lambat) =====
+	MaxPitchRate        = 60,   -- sebelumnya 45
+	MaxYawRate          = 75,   -- sebelumnya 30 -> sekarang jauh lebih cepat belok
+	MaxRollRate         = 170,  -- sebelumnya 150
+	AngularAcceleration = 340,  -- sebelumnya 200 -> respon lebih instan/tidak lag
 
-	ControlAuthorityMinFactor = 0.25,
+	ControlAuthorityMinFactor = 0.45, -- sebelumnya 0.25 -> tetap gesit walau pelan
 	VelocityAlignStrength     = 0.6,
 
 	InvertPitch = false,
 	InvertRoll  = false,
 
-	StickDeadzone = 0.08,
+	StickDeadzone = 0.06,
 
-	-- Kamera
-	CameraDistance    = 22,
-	CameraHeight      = 6,
-	CameraStiffness   = 6,
-	CameraFOVBase     = 70,
-	CameraFOVSpeedBonus = 14,
-	CameraFOVBoostBonus = 16,
-	ShakeBoost        = 0.4,
-	ShakeHighG        = 1.2,
-	HighGThreshold    = 4.0,
+	-- Kamera (simple smooth TPS)
+	CameraDistance      = 20,
+	CameraHeight        = 6,
+	CameraStiffness     = 8,    -- makin besar makin cepat "nempel" ke pesawat
+	CameraFOVBase       = 70,
+	CameraFOVBoostBonus = 15,
 
 	StartSpeed = 90,
 }
@@ -85,7 +79,7 @@ local State = {
 	StallAmount = 0, GForce = 1,
 }
 
-local ThrottleValue = 0.35 -- 0..1, dikontrol slider (bukan joystick lagi)
+local ThrottleValue = 0.35
 local FlightActive  = false
 
 local humanoid, hrp, character
@@ -116,9 +110,6 @@ gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = player:WaitForChild("PlayerGui")
 
---------------------------------------------------------------
--- Joystick helper
---------------------------------------------------------------
 local function CreateJoystick(nameTag, anchor, pos)
 	local bg = Instance.new("Frame")
 	bg.Name = nameTag.."BG"
@@ -187,14 +178,12 @@ local function CreateJoystick(nameTag, anchor, pos)
 	return joystick
 end
 
--- Joystick KIRI: arah dasar (pitch naik/turun, yaw kiri/kanan)
+-- Joystick KIRI: pitch (naik/turun) + yaw (kiri/kanan)
 local LeftStick  = CreateJoystick("MOVE (Pitch/Yaw)", Vector2.new(0,1), UDim2.new(0,120,1,-30))
 -- Joystick KANAN: manual roll/miring
 local RightStick = CreateJoystick("BANK (Roll)", Vector2.new(1,1), UDim2.new(1,-120,1,-30))
 
---------------------------------------------------------------
--- Throttle slider (TERPISAH, jauh dari kedua joystick -> tepi kiri, TENGAH layar)
---------------------------------------------------------------
+-- Throttle slider (terpisah, kiri-tengah layar)
 local throttleTrack = Instance.new("Frame")
 throttleTrack.Size = UDim2.new(0,46,0,200)
 throttleTrack.AnchorPoint = Vector2.new(0,0.5)
@@ -251,9 +240,7 @@ UserInputService.InputEnded:Connect(function(input)
 	if throttleTouch == input then throttleTouch = nil end
 end)
 
---------------------------------------------------------------
 -- Tombol generik
---------------------------------------------------------------
 local function CreateButton(text, pos, size, color)
 	local b = Instance.new("TextButton")
 	b.Text = text
@@ -271,7 +258,6 @@ local function CreateButton(text, pos, size, color)
 	return b
 end
 
--- HOLD button (aman untuk touch, tidak double-fire)
 local function bindHold(button, onDown, onUp)
 	local pressing = false
 	button.InputBegan:Connect(function(input)
@@ -292,28 +278,21 @@ local function bindHold(button, onDown, onUp)
 	end)
 end
 
--- TAP button (pakai Activated -> aman, tidak double-fire di mobile)
 local function bindTap(button, onTap)
 	button.Activated:Connect(onTap)
 end
 
---------------------------------------------------------------
 -- ROLL L/R (manuver roll cepat, terpisah dari joystick kanan)
---------------------------------------------------------------
 local rollLeftBtn  = CreateButton("◄ ROLL", UDim2.new(1,-260,1,-190), UDim2.new(0,64,0,64), Color3.fromRGB(70,70,70))
 local rollRightBtn = CreateButton("ROLL ►", UDim2.new(1,-170,1,-190), UDim2.new(0,64,0,64), Color3.fromRGB(70,70,70))
 bindHold(rollLeftBtn,  function() State.RollLeftBtn=true end,  function() State.RollLeftBtn=false end)
 bindHold(rollRightBtn, function() State.RollRightBtn=true end, function() State.RollRightBtn=false end)
 
---------------------------------------------------------------
 -- AIRBRAKE
---------------------------------------------------------------
 local brakeBtn = CreateButton("AIR\nBRAKE", UDim2.new(1,-215,1,-270), UDim2.new(0,64,0,64), Color3.fromRGB(120,30,30))
 bindHold(brakeBtn, function() State.Airbrake=true end, function() State.Airbrake=false end)
 
---------------------------------------------------------------
 -- BOOST (tap sekali, cooldown otomatis)
---------------------------------------------------------------
 local boostBtn = CreateButton("BOOST", UDim2.new(1,-90,1,-190), UDim2.new(0,80,0,80), Color3.fromRGB(0,140,220))
 local boostCooldownRing = Instance.new("Frame")
 boostCooldownRing.Size = UDim2.new(1,0,0,6)
@@ -330,9 +309,7 @@ bindTap(boostBtn, function()
 	end
 end)
 
---------------------------------------------------------------
 -- HUD info
---------------------------------------------------------------
 local hud = Instance.new("Frame")
 hud.Size = UDim2.new(0,210,0,100)
 hud.Position = UDim2.new(0,20,0,20)
@@ -421,7 +398,7 @@ if player.Character then
 end
 
 --=====================================================================
--- 6. BOOST LOGIC (tap -> aktif otomatis -> cooldown)
+-- 6. BOOST LOGIC
 --=====================================================================
 local function updateBoost(dt)
 	if State.BoostActive then
@@ -439,7 +416,6 @@ local function updateBoost(dt)
 		end
 	end
 
-	-- update UI boost
 	if State.BoostActive then
 		boostBtn.BackgroundColor3 = Color3.fromRGB(0,220,255)
 		boostCooldownRing.Size = UDim2.new(State.BoostTimeLeft/Config.BoostDuration,0,0,6)
@@ -463,7 +439,6 @@ local function updatePhysics(dt)
 
 	updateBoost(dt)
 
-	-- Throttle UI update
 	throttleFill.Position = UDim2.new(0,0,1-ThrottleValue,0)
 	throttleFill.Size     = UDim2.new(1,0,ThrottleValue,0)
 	throttlePctLabel.Text = string.format("%d%%", ThrottleValue*100)
@@ -478,7 +453,7 @@ local function updatePhysics(dt)
 	if State.RollRightBtn then rollButton += 1 end
 	local rollInput = math.clamp(rollAnalog + rollButton, -1, 1)
 
-	-- ===== Control authority (berkurang saat lambat/stall) =====
+	-- ===== Control authority =====
 	local speed = Velocity.Magnitude
 	local speedFactor = math.clamp(speed/Config.StallSpeed, Config.ControlAuthorityMinFactor, 1)
 	local controlAuthority = speedFactor * (1 - State.StallAmount*0.8)
@@ -493,7 +468,6 @@ local function updatePhysics(dt)
 		approach(AngularVelocity.Z, targetRollRate,  Config.AngularAcceleration*1.4, dt)
 	)
 
-	-- ===== Apply rotasi (inersia rotasi terjaga) =====
 	local rotDelta = CFrame.Angles(
 		math.rad(AngularVelocity.X)*dt,
 		math.rad(AngularVelocity.Y)*dt,
@@ -504,12 +478,12 @@ local function updatePhysics(dt)
 	local forward = JetCFrame.LookVector
 	local up      = JetCFrame.UpVector
 
-	-- ===== Thrust (throttle = satu-satunya sumber percepatan maju) =====
+	-- ===== Thrust =====
 	local baseThrust = ThrottleValue * Config.MaxThrust
 	local boostThrust = State.BoostActive and (Config.MaxThrust*(Config.BoostThrustMultiplier-1)) or 0
 	local thrustForce = forward * (baseThrust + boostThrust)
 
-	-- ===== Angle of Attack & Stall =====
+	-- ===== AoA & Stall =====
 	local velDir = speed > 1 and Velocity.Unit or forward
 	local aoaCos = math.clamp(forward:Dot(velDir), -1, 1)
 	local aoaDeg = math.deg(math.acos(aoaCos))
@@ -543,7 +517,7 @@ local function updatePhysics(dt)
 
 	State.GForce = ((Velocity-prevVel)/dt - gravityAccel).Magnitude / Config.Gravity
 
-	-- ===== Weathervane stability (hidung menarik arah gerak) =====
+	-- ===== Weathervane stability =====
 	if speed > 1 then
 		local alignStrength = Config.VelocityAlignStrength * (1-stallAmount)
 		local newDir = velDir:Lerp(forward, math.clamp(alignStrength*dt,0,1))
@@ -552,7 +526,7 @@ local function updatePhysics(dt)
 		end
 	end
 
-	-- ===== Clamp kecepatan (soft, halus turun setelah boost) =====
+	-- ===== Clamp kecepatan =====
 	local maxSpeedNow = Config.MaxSpeed + (State.BoostActive and Config.BoostMaxSpeedBonus or 0)
 	local curSpeed = Velocity.Magnitude
 	if curSpeed > maxSpeedNow then
@@ -581,43 +555,25 @@ local function updatePhysics(dt)
 end
 
 --=====================================================================
--- 8. CAMERA (chase cam smooth + FOV speed/boost + shake)
+-- 8. CAMERA -- SIMPLE SMOOTH TPS FOLLOW (sesuai request terbaru)
 --=====================================================================
 local currentFOV = Config.CameraFOVBase
 
 local function updateCamera(dt)
 	if not FlightActive or not hrp or not hrp.Parent then return end
 
-	local speed = Velocity.Magnitude
-	local speedRatio = math.clamp(speed/Config.MaxSpeed, 0, 1)
-
+	-- Posisi kamera: di belakang & sedikit di atas pesawat, mengikuti orientasi pesawat
 	local offset = Vector3.new(0, Config.CameraHeight, Config.CameraDistance)
 	local camPos = JetCFrame.Position + JetCFrame:VectorToWorldSpace(offset)
-	local lookAt = JetCFrame.Position + JetCFrame.LookVector*15
+	local lookAt = JetCFrame.Position
 
 	local targetCFrame = CFrame.new(camPos, lookAt)
 
-	local shakeIntensity = 0
-	if State.BoostActive then
-		shakeIntensity += Config.ShakeBoost
-	end
-	if State.GForce > Config.HighGThreshold then
-		shakeIntensity += Config.ShakeHighG
-	end
-	if shakeIntensity > 0 then
-		local shakeOffset = Vector3.new(
-			(math.random()-0.5)*shakeIntensity,
-			(math.random()-0.5)*shakeIntensity,
-			0
-		)
-		targetCFrame = targetCFrame * CFrame.new(shakeOffset)
-	end
+	-- Smooth follow (Lerp) -- tidak ada shake, simpel & halus
+	camera.CFrame = camera.CFrame:Lerp(targetCFrame, math.clamp(Config.CameraStiffness*dt, 0, 1))
 
-	camera.CFrame = camera.CFrame:Lerp(targetCFrame, math.clamp(Config.CameraStiffness*dt,0,1))
-
-	local targetFOV = Config.CameraFOVBase
-		+ speedRatio*Config.CameraFOVSpeedBonus
-		+ (State.BoostActive and Config.CameraFOVBoostBonus or 0)
+	-- FOV: normal, membesar dikit hanya saat boost aktif
+	local targetFOV = Config.CameraFOVBase + (State.BoostActive and Config.CameraFOVBoostBonus or 0)
 	currentFOV = currentFOV + (targetFOV-currentFOV)*math.clamp(dt*3,0,1)
 	camera.FieldOfView = currentFOV
 end
@@ -636,4 +592,4 @@ RunService.RenderStepped:Connect(function(dt)
 	if not ok then warn("[JetFlight] camera error:", err) end
 end)
 
-print("[JetFlight] Flight system v2 aktif.")
+print("[JetFlight] Flight system v2.1 aktif.")
