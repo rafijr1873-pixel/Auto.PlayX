@@ -1,6 +1,6 @@
 --=====================================================================
--- JET-STYLE FLIGHT SYSTEM (MOBILE/TOUCH) - No Gravity, No Stall
--- Seperti fly script biasa, tapi dengan momentum/inertia ala jet
+-- JET-STYLE FLIGHT ENGINE (BodyGyro + BodyVelocity based)
+-- Diadaptasi dari fly engine klasik, dibuat "maju terus" seperti jet
 -- LocalScript - taruh di StarterPlayerScripts
 --=====================================================================
 
@@ -12,69 +12,48 @@ local player = Players.LocalPlayer
 local camera = workspace.CurrentCamera
 
 --=====================================================================
--- 1. CONFIG (SEMUA PARAMETER MUDAH DIUBAH DI SINI)
+-- 1. CONFIG (MUDAH DIUBAH)
 --=====================================================================
 local Config = {
-	-- Kecepatan & Throttle
-	MaxSpeed     = 140,   -- kecepatan maksimum normal
-	StartSpeed   = 50,
-	AccelRate    = 90,    -- seberapa cepat speed naik menuju target (inertia akselerasi)
-	DecelRate    = 70,    -- seberapa cepat speed turun menuju target (inertia deselerasi)
-	AirbrakeDecelMultiplier = 3.5,
+	CruiseSpeed   = 60,     -- kecepatan jelajah konstan (jet selalu maju)
+	SpeedRampRate = 40,     -- seberapa cepat speed naik dari 0 -> CruiseSpeed saat spawn (momentum awal)
 
-	-- Momentum arah (jet-like drift): makin kecil = makin "berat"/lambat berubah arah
-	VelocityAlignSpeed = 3.2, -- per detik, seberapa cepat arah gerak menyusul arah hidung
+	PitchRate = 50,   -- derajat/detik, dari joystick kiri (atas/bawah)
+	YawRate   = 60,   -- derajat/detik, dari joystick kiri (kiri/kanan)
+	RollRate  = 150,  -- derajat/detik, dari joystick kanan (miring)
 
-	-- Boost
-	BoostSpeedBonus = 90,   -- tambahan MaxSpeed sementara saat boost
-	BoostDuration   = 2.2,
-	BoostCooldown   = 7,
-
-	-- Kontrol rotasi (derajat/detik)
-	MaxPitchRate        = 65,
-	MaxYawRate           = 80,
-	MaxRollRate          = 180,
-	AngularAcceleration  = 380, -- makin besar = makin responsif (tidak lag)
-
-	-- Efek jet: rolling menyebabkan sedikit yaw otomatis (bank-to-turn), 0 = matikan
-	BankToTurnStrength = 22,
+	AngularAcceleration = 260, -- makin besar = makin responsif, makin kecil = makin "berat"/momentum kuat
 
 	InvertPitch = false,
 	InvertRoll  = false,
 	StickDeadzone = 0.06,
 
-	-- Kamera (simple smooth TPS)
-	CameraDistance      = 20,
-	CameraHeight        = 6,
-	CameraStiffness     = 8,
-	CameraFOVBase       = 70,
-	CameraFOVBoostBonus = 15,
+	-- BodyGyro / BodyVelocity settings (sama filosofi seperti engine asli)
+	GyroP        = 9e4,
+	GyroMaxTorque= Vector3.new(9e9,9e9,9e9),
+	VelocityMaxForce = Vector3.new(9e9,9e9,9e9),
+
+	-- Kamera (smooth TPS follow sederhana)
+	CameraDistance  = 18,
+	CameraHeight    = 6,
+	CameraStiffness = 8,
+	CameraFOV       = 70,
 }
 
 --=====================================================================
 -- 2. STATE
 --=====================================================================
-local JetCFrame       = CFrame.new()
-local VelocityDir      = Vector3.new(0,0,-1) -- arah gerak aktual (punya momentum sendiri)
-local CurrentSpeed      = 0
-local AngularVelocity   = Vector3.new(0,0,0)
+local JetCFrame       = CFrame.new() -- orientasi target (akumulasi rotasi dari input)
+local AngularVelocity = Vector3.new(0,0,0) -- pitch,yaw,roll (deg/s), untuk inertia rotasi
+local CurrentSpeed    = 0
 
-local State = {
-	Airbrake = false,
-	BoostActive = false, BoostOnCooldown = false,
-	BoostTimeLeft = 0, CooldownTimeLeft = 0,
-}
-
-local ThrottleValue = 0.35
-local FlightActive  = false
-
-local humanoid, hrp, character
+local FlightActive = false
+local character, humanoid, hrp
+local bg, bv -- BodyGyro, BodyVelocity
 
 --=====================================================================
 -- 3. UTIL
 --=====================================================================
-local function clamp01(v) return math.clamp(v,0,1) end
-
 local function approach(current, target, maxDelta, dt)
 	local diff = target - current
 	local maxChange = maxDelta*dt
@@ -88,35 +67,34 @@ local function applyDeadzone(v)
 end
 
 --=====================================================================
--- 4. BUILD UI
+-- 4. BUILD UI -- HANYA 2 JOYSTICK (sesuai request, GUI dibuat sendiri)
 --=====================================================================
 local gui = Instance.new("ScreenGui")
-gui.Name = "JetFlightHUD"
+gui.Name = "JetFlightControls"
 gui.ResetOnSpawn = false
 gui.IgnoreGuiInset = true
 gui.Parent = player:WaitForChild("PlayerGui")
 
 local function CreateJoystick(nameTag, anchor, pos)
-	local bg = Instance.new("Frame")
-	bg.Name = nameTag.."BG"
-	bg.Size = UDim2.new(0,140,0,140)
-	bg.AnchorPoint = anchor
-	bg.Position = pos
-	bg.BackgroundColor3 = Color3.fromRGB(255,255,255)
-	bg.BackgroundTransparency = 0.65
-	bg.BorderSizePixel = 0
-	bg.Active = true
-	bg.Parent = gui
-	Instance.new("UICorner", bg).CornerRadius = UDim.new(1,0)
+	local bg_ = Instance.new("Frame")
+	bg_.Name = nameTag.."BG"
+	bg_.Size = UDim2.new(0,140,0,140)
+	bg_.AnchorPoint = anchor
+	bg_.Position = pos
+	bg_.BackgroundColor3 = Color3.fromRGB(255,255,255)
+	bg_.BackgroundTransparency = 0.65
+	bg_.BorderSizePixel = 0
+	bg_.Active = true
+	bg_.Parent = gui
+	Instance.new("UICorner", bg_).CornerRadius = UDim.new(1,0)
 
 	local knob = Instance.new("Frame")
-	knob.Name = "Knob"
 	knob.Size = UDim2.new(0,64,0,64)
 	knob.AnchorPoint = Vector2.new(0.5,0.5)
 	knob.Position = UDim2.new(0.5,0,0.5,0)
 	knob.BackgroundColor3 = Color3.fromRGB(255,255,255)
 	knob.BackgroundTransparency = 0.15
-	knob.Parent = bg
+	knob.Parent = bg_
 	Instance.new("UICorner", knob).CornerRadius = UDim.new(1,0)
 
 	local label = Instance.new("TextLabel")
@@ -127,12 +105,12 @@ local function CreateJoystick(nameTag, anchor, pos)
 	label.Font = Enum.Font.GothamBold
 	label.TextSize = 13
 	label.Text = nameTag
-	label.Parent = bg
+	label.Parent = bg_
 
 	local joystick = {X=0, Y=0, _touch=nil, radius=70}
 
 	local function updateKnob(inputPos)
-		local center = bg.AbsolutePosition + bg.AbsoluteSize/2
+		local center = bg_.AbsolutePosition + bg_.AbsoluteSize/2
 		local delta = Vector2.new(inputPos.X, inputPos.Y) - center
 		local dist = math.min(delta.Magnitude, joystick.radius)
 		local dir = (delta.Magnitude>0) and delta.Unit or Vector2.new()
@@ -148,7 +126,7 @@ local function CreateJoystick(nameTag, anchor, pos)
 		knob.Position = UDim2.new(0.5,0,0.5,0)
 	end
 
-	bg.InputBegan:Connect(function(input)
+	bg_.InputBegan:Connect(function(input)
 		if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
 			joystick._touch = input
 			updateKnob(input.Position)
@@ -164,161 +142,24 @@ local function CreateJoystick(nameTag, anchor, pos)
 	return joystick
 end
 
--- Joystick KIRI: pitch (naik/turun) + yaw (kiri/kanan) -- kaya fly character biasa
-local LeftStick  = CreateJoystick("PITCH / YAW", Vector2.new(0,1), UDim2.new(0,120,1,-30))
--- Joystick KANAN: hanya roll/miring
-local RightStick = CreateJoystick("ROLL (MIRING)", Vector2.new(1,1), UDim2.new(1,-120,1,-30))
-
--- Throttle slider (terpisah, kiri-tengah layar)
-local throttleTrack = Instance.new("Frame")
-throttleTrack.Size = UDim2.new(0,46,0,200)
-throttleTrack.AnchorPoint = Vector2.new(0,0.5)
-throttleTrack.Position = UDim2.new(0,20,0.5,0)
-throttleTrack.BackgroundColor3 = Color3.fromRGB(0,0,0)
-throttleTrack.BackgroundTransparency = 0.4
-throttleTrack.Active = true
-throttleTrack.Parent = gui
-Instance.new("UICorner", throttleTrack).CornerRadius = UDim.new(0,10)
-
-local throttleFill = Instance.new("Frame")
-throttleFill.BackgroundColor3 = Color3.fromRGB(255,190,0)
-throttleFill.BorderSizePixel = 0
-throttleFill.Position = UDim2.new(0,0,1-ThrottleValue,0)
-throttleFill.Size = UDim2.new(1,0,ThrottleValue,0)
-throttleFill.Parent = throttleTrack
-Instance.new("UICorner", throttleFill).CornerRadius = UDim.new(0,10)
-
-local throttleLabel = Instance.new("TextLabel")
-throttleLabel.Size = UDim2.new(1,0,0,20)
-throttleLabel.Position = UDim2.new(0,0,-1,-4)
-throttleLabel.BackgroundTransparency = 1
-throttleLabel.TextColor3 = Color3.new(1,1,1)
-throttleLabel.Font = Enum.Font.GothamBold
-throttleLabel.TextSize = 13
-throttleLabel.Text = "THROTTLE"
-throttleLabel.Parent = throttleTrack
-
-local throttlePctLabel = Instance.new("TextLabel")
-throttlePctLabel.Size = UDim2.new(1,0,0,20)
-throttlePctLabel.Position = UDim2.new(0,0,1,4)
-throttlePctLabel.BackgroundTransparency = 1
-throttlePctLabel.TextColor3 = Color3.new(1,1,1)
-throttlePctLabel.Font = Enum.Font.GothamBold
-throttlePctLabel.TextSize = 13
-throttlePctLabel.Text = "35%"
-throttlePctLabel.Parent = throttleTrack
-
-local throttleTouch = nil
-local function setThrottleFromPos(inputPos)
-	local rel = 1 - clamp01((inputPos.Y - throttleTrack.AbsolutePosition.Y)/throttleTrack.AbsoluteSize.Y)
-	ThrottleValue = clamp01(rel)
-end
-throttleTrack.InputBegan:Connect(function(input)
-	if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
-		throttleTouch = input
-		setThrottleFromPos(input.Position)
-	end
-end)
-UserInputService.InputChanged:Connect(function(input)
-	if throttleTouch == input then setThrottleFromPos(input.Position) end
-end)
-UserInputService.InputEnded:Connect(function(input)
-	if throttleTouch == input then throttleTouch = nil end
-end)
-
--- Tombol generik
-local function CreateButton(text, pos, size, color)
-	local b = Instance.new("TextButton")
-	b.Text = text
-	b.Size = size or UDim2.new(0,72,0,72)
-	b.Position = pos
-	b.AnchorPoint = Vector2.new(0.5,0.5)
-	b.BackgroundColor3 = color or Color3.fromRGB(50,50,50)
-	b.BackgroundTransparency = 0.2
-	b.TextColor3 = Color3.new(1,1,1)
-	b.Font = Enum.Font.GothamBold
-	b.TextSize = 14
-	b.AutoButtonColor = true
-	b.Parent = gui
-	Instance.new("UICorner", b).CornerRadius = UDim.new(1,0)
-	return b
-end
-
-local function bindHold(button, onDown, onUp)
-	local pressing = false
-	button.InputBegan:Connect(function(input)
-		if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
-			if not pressing then
-				pressing = true
-				onDown()
-			end
-		end
-	end)
-	button.InputEnded:Connect(function(input)
-		if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
-			if pressing then
-				pressing = false
-				onUp()
-			end
-		end
-	end)
-end
-
-local function bindTap(button, onTap)
-	button.Activated:Connect(onTap)
-end
-
--- AIRBRAKE
-local brakeBtn = CreateButton("AIR\nBRAKE", UDim2.new(1,-215,1,-190), UDim2.new(0,64,0,64), Color3.fromRGB(120,30,30))
-bindHold(brakeBtn, function() State.Airbrake=true end, function() State.Airbrake=false end)
-
--- BOOST (tap sekali, cooldown otomatis)
-local boostBtn = CreateButton("BOOST", UDim2.new(1,-90,1,-190), UDim2.new(0,80,0,80), Color3.fromRGB(0,140,220))
-local boostCooldownRing = Instance.new("Frame")
-boostCooldownRing.Size = UDim2.new(1,0,0,6)
-boostCooldownRing.Position = UDim2.new(0,0,1,4)
-boostCooldownRing.BackgroundColor3 = Color3.fromRGB(255,60,60)
-boostCooldownRing.BorderSizePixel = 0
-boostCooldownRing.Parent = boostBtn
-Instance.new("UICorner", boostCooldownRing).CornerRadius = UDim.new(1,0)
-
-bindTap(boostBtn, function()
-	if (not State.BoostActive) and (not State.BoostOnCooldown) then
-		State.BoostActive = true
-		State.BoostTimeLeft = Config.BoostDuration
-	end
-end)
-
--- HUD info
-local hud = Instance.new("Frame")
-hud.Size = UDim2.new(0,200,0,70)
-hud.Position = UDim2.new(0,20,0,20)
-hud.BackgroundTransparency = 0.4
-hud.BackgroundColor3 = Color3.new(0,0,0)
-hud.Parent = gui
-Instance.new("UICorner", hud).CornerRadius = UDim.new(0,8)
-
-local function hudLabel(order)
-	local l = Instance.new("TextLabel")
-	l.Size = UDim2.new(1,0,0,20)
-	l.Position = UDim2.new(0,10,0,4+(order-1)*20)
-	l.BackgroundTransparency = 1
-	l.TextXAlignment = Enum.TextXAlignment.Left
-	l.TextColor3 = Color3.new(1,1,1)
-	l.Font = Enum.Font.Code
-	l.TextSize = 15
-	l.Parent = hud
-	return l
-end
-local speedLabel = hudLabel(1)
-local boostLabel = hudLabel(2)
+-- Joystick KIRI: yaw (kiri/kanan) + pitch (atas/bawah) -- kaya belok player biasa
+local LeftStick  = CreateJoystick("BELOK (Pitch/Yaw)", Vector2.new(0,1), UDim2.new(0,120,1,-30))
+-- Joystick KANAN: hanya miring/roll
+local RightStick = CreateJoystick("MIRING (Roll)", Vector2.new(1,1), UDim2.new(1,-120,1,-30))
 
 --=====================================================================
--- 5. SETUP KARAKTER
+-- 5. SETUP KARAKTER + ENGINE (BodyGyro + BodyVelocity, seperti fly script asli)
 --=====================================================================
-local function teardownCharacter()
+local function cleanupEngine()
+	if bg then bg:Destroy(); bg = nil end
+	if bv then bv:Destroy(); bv = nil end
+	if humanoid then
+		humanoid.PlatformStand = false
+		humanoid.AutoRotate = true
+	end
+	local anim = character and character:FindFirstChild("Animate")
+	if anim then anim.Disabled = false end
 	FlightActive = false
-	if hrp then hrp.Anchored = false end
 	camera.CameraType = Enum.CameraType.Custom
 end
 
@@ -331,103 +172,62 @@ local function setupCharacter(char)
 	humanoid.PlatformStand = true
 	humanoid.AutoRotate    = false
 
-	for _,part in ipairs(char:GetDescendants()) do
-		if part:IsA("BasePart") then
-			part.CanCollide = false
-		end
-	end
+	-- disable animasi (biar gak kaya jalan/lari pas terbang) -- sama seperti engine asli
+	local anim = char:FindFirstChild("Animate")
+	if anim then anim.Disabled = true end
 
-	hrp.Anchored = true -- kontrol penuh via script, tidak ada gravity Roblox yang ikut campur
+	-- ===== BodyGyro & BodyVelocity (INTI ENGINE, diambil dari fly script asli) =====
+	bg = Instance.new("BodyGyro")
+	bg.Parent = hrp
+	bg.P = Config.GyroP
+	bg.MaxTorque = Config.GyroMaxTorque
+	bg.CFrame = hrp.CFrame
 
-	JetCFrame  = hrp.CFrame
-	VelocityDir = JetCFrame.LookVector
-	CurrentSpeed = Config.StartSpeed
+	bv = Instance.new("BodyVelocity")
+	bv.Parent = hrp
+	bv.MaxForce = Config.VelocityMaxForce
+	bv.Velocity = Vector3.new(0,0,0)
+
+	JetCFrame = hrp.CFrame
 	AngularVelocity = Vector3.new(0,0,0)
-
-	State.BoostActive = false
-	State.BoostOnCooldown = false
-	State.BoostTimeLeft = 0
-	State.CooldownTimeLeft = 0
+	CurrentSpeed = 0 -- mulai dari 0, akan ramp up ke CruiseSpeed (momentum awal seperti jet lepas landas)
 
 	camera.CameraType = Enum.CameraType.Scriptable
 
-	humanoid.Died:Connect(teardownCharacter)
+	humanoid.Died:Connect(cleanupEngine)
 
 	FlightActive = true
 end
 
 player.CharacterAdded:Connect(setupCharacter)
-player.CharacterRemoving:Connect(teardownCharacter)
+player.CharacterRemoving:Connect(cleanupEngine)
 if player.Character then
 	setupCharacter(player.Character)
 end
 
 --=====================================================================
--- 6. BOOST LOGIC
+-- 6. MAIN ENGINE LOOP (adaptasi dari BodyGyro/BodyVelocity fly engine asli)
 --=====================================================================
-local function updateBoost(dt)
-	if State.BoostActive then
-		State.BoostTimeLeft = State.BoostTimeLeft - dt
-		if State.BoostTimeLeft <= 0 then
-			State.BoostActive = false
-			State.BoostOnCooldown = true
-			State.CooldownTimeLeft = Config.BoostCooldown
-		end
-	elseif State.BoostOnCooldown then
-		State.CooldownTimeLeft = State.CooldownTimeLeft - dt
-		if State.CooldownTimeLeft <= 0 then
-			State.BoostOnCooldown = false
-			State.CooldownTimeLeft = 0
-		end
-	end
-
-	if State.BoostActive then
-		boostBtn.BackgroundColor3 = Color3.fromRGB(0,220,255)
-		boostCooldownRing.Size = UDim2.new(State.BoostTimeLeft/Config.BoostDuration,0,0,6)
-		boostCooldownRing.BackgroundColor3 = Color3.fromRGB(0,255,150)
-	elseif State.BoostOnCooldown then
-		boostBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
-		boostCooldownRing.Size = UDim2.new(1-(State.CooldownTimeLeft/Config.BoostCooldown),0,0,6)
-		boostCooldownRing.BackgroundColor3 = Color3.fromRGB(255,60,60)
-	else
-		boostBtn.BackgroundColor3 = Color3.fromRGB(0,140,220)
-		boostCooldownRing.Size = UDim2.new(1,0,0,6)
-		boostCooldownRing.BackgroundColor3 = Color3.fromRGB(0,255,150)
-	end
-end
-
---=====================================================================
--- 7. MAIN FLIGHT LOGIC (No Gravity, No Stall, Momentum-based)
---=====================================================================
-local function updatePhysics(dt)
-	if not FlightActive or not hrp or not hrp.Parent then return end
-
-	updateBoost(dt)
-
-	throttleFill.Position = UDim2.new(0,0,1-ThrottleValue,0)
-	throttleFill.Size     = UDim2.new(1,0,ThrottleValue,0)
-	throttlePctLabel.Text = string.format("%d%%", ThrottleValue*100)
+local function updateFlight(dt)
+	if not FlightActive or not hrp or not hrp.Parent or not bg or not bv then return end
 
 	-- ===== Input =====
 	local pitchInput = applyDeadzone(LeftStick.Y) * (Config.InvertPitch and -1 or 1)
 	local yawInput   = applyDeadzone(LeftStick.X)
 	local rollInput  = applyDeadzone(RightStick.X) * (Config.InvertRoll and -1 or 1)
 
-	-- ===== Bank-to-turn: makin miring, makin nambah yaw otomatis (efek jet) =====
-	local bankSin = JetCFrame.RightVector:Dot(Vector3.new(0,1,0))
-	local bankYawBonus = -bankSin * Config.BankToTurnStrength
+	local targetPitchRate = pitchInput * Config.PitchRate
+	local targetYawRate   = yawInput   * Config.YawRate
+	local targetRollRate  = rollInput  * Config.RollRate
 
-	local targetPitchRate = pitchInput * Config.MaxPitchRate
-	local targetYawRate   = (yawInput * Config.MaxYawRate) + bankYawBonus
-	local targetRollRate  = rollInput * Config.MaxRollRate
-
+	-- ===== Inertia rotasi (momentum, sama filosofi seperti speed ramp di engine asli) =====
 	AngularVelocity = Vector3.new(
 		approach(AngularVelocity.X, targetPitchRate, Config.AngularAcceleration, dt),
 		approach(AngularVelocity.Y, targetYawRate,   Config.AngularAcceleration, dt),
-		approach(AngularVelocity.Z, targetRollRate,  Config.AngularAcceleration*1.4, dt)
+		approach(AngularVelocity.Z, targetRollRate,  Config.AngularAcceleration*1.3, dt)
 	)
 
-	-- ===== Apply rotasi =====
+	-- ===== Akumulasi orientasi target =====
 	local rotDelta = CFrame.Angles(
 		math.rad(AngularVelocity.X)*dt,
 		math.rad(AngularVelocity.Y)*dt,
@@ -435,82 +235,41 @@ local function updatePhysics(dt)
 	)
 	JetCFrame = JetCFrame * rotDelta
 
-	local forward = JetCFrame.LookVector
+	-- ===== Speed ramp (momentum maju, seperti engine asli: speed = speed + .5 dst) =====
+	CurrentSpeed = approach(CurrentSpeed, Config.CruiseSpeed, Config.SpeedRampRate, dt)
 
-	-- ===== Speed dari Throttle (dengan inertia, tidak instan) =====
-	local targetSpeed = ThrottleValue * Config.MaxSpeed
-	if State.BoostActive then
-		targetSpeed += Config.BoostSpeedBonus
-	end
-
-	local decelRate = Config.DecelRate
-	if State.Airbrake then
-		targetSpeed = 0
-		decelRate = Config.DecelRate * Config.AirbrakeDecelMultiplier
-	end
-
-	if targetSpeed > CurrentSpeed then
-		CurrentSpeed = approach(CurrentSpeed, targetSpeed, Config.AccelRate, dt)
-	else
-		CurrentSpeed = approach(CurrentSpeed, targetSpeed, decelRate, dt)
-	end
-
-	-- ===== Momentum arah gerak (jet-like drift/inertia saat belok) =====
-	VelocityDir = VelocityDir:Lerp(forward, math.clamp(Config.VelocityAlignSpeed*dt, 0, 1))
-	if VelocityDir.Magnitude > 0 then
-		VelocityDir = VelocityDir.Unit
-	end
-
-	local velocity = VelocityDir * CurrentSpeed
-
-	-- ===== Update posisi (tidak ada gravity, tidak ada jatuh) =====
-	local newPos = JetCFrame.Position + velocity*dt
-	JetCFrame = CFrame.new(newPos) * (JetCFrame - JetCFrame.Position)
-	hrp.CFrame = JetCFrame
-
-	-- ===== HUD =====
-	speedLabel.Text = string.format("SPD %d", math.floor(CurrentSpeed))
-	if State.BoostActive then
-		boostLabel.Text = string.format("BOOST ACTIVE %.1fs", State.BoostTimeLeft)
-	elseif State.BoostOnCooldown then
-		boostLabel.Text = string.format("BOOST CD %.1fs", State.CooldownTimeLeft)
-	else
-		boostLabel.Text = "BOOST READY"
-	end
+	-- ===== Apply ke BodyGyro & BodyVelocity (INI ENGINE INTINYA) =====
+	bg.CFrame = JetCFrame
+	bv.Velocity = JetCFrame.LookVector * CurrentSpeed
 end
 
 --=====================================================================
--- 8. CAMERA -- SIMPLE SMOOTH TPS FOLLOW
+-- 7. CAMERA -- SIMPLE SMOOTH TPS FOLLOW
 --=====================================================================
-local currentFOV = Config.CameraFOVBase
-
 local function updateCamera(dt)
 	if not FlightActive or not hrp or not hrp.Parent then return end
 
 	local offset = Vector3.new(0, Config.CameraHeight, Config.CameraDistance)
 	local camPos = JetCFrame.Position + JetCFrame:VectorToWorldSpace(offset)
-	local lookAt = JetCFrame.Position
+	local lookAt = hrp.Position
 
 	local targetCFrame = CFrame.new(camPos, lookAt)
 	camera.CFrame = camera.CFrame:Lerp(targetCFrame, math.clamp(Config.CameraStiffness*dt, 0, 1))
-
-	local targetFOV = Config.CameraFOVBase + (State.BoostActive and Config.CameraFOVBoostBonus or 0)
-	currentFOV = currentFOV + (targetFOV-currentFOV)*math.clamp(dt*3,0,1)
-	camera.FieldOfView = currentFOV
+	camera.FieldOfView = Config.CameraFOV
 end
 
 --=====================================================================
--- 9. MAIN LOOP
+-- 8. MAIN LOOP
 --=====================================================================
 RunService.Heartbeat:Connect(function(dt)
 	dt = math.min(dt, 1/30)
-	local ok, err = pcall(updatePhysics, dt)
-	if not ok then warn("[JetFlight] physics error:", err) end
+	local ok, err = pcall(updateFlight, dt)
+	if not ok then warn("[JetEngine] error:", err) end
 end)
 
 RunService.RenderStepped:Connect(function(dt)
 	local ok, err = pcall(updateCamera, dt)
-	if not ok then warn("[JetFlight] camera error:", err) end
+	if not ok then warn("[JetEngine] camera error:", err) end
 end)
 
-print("[JetFlight] Flight system (No Gravity/Stall) aktif.")
+print("[JetEngine] Aktif - BodyGyro/BodyVelocity jet engine.")
