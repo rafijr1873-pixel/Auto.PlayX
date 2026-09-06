@@ -16,10 +16,10 @@ local camera = workspace.CurrentCamera
 --=====================================================================
 local Config = {
 	-- Speed / Throttle
-	MaxSpeed      = 90,    -- kecepatan maksimum dari throttle 100%
+	MaxSpeed      = 200,    -- kecepatan maksimum dari throttle 100%
 	MinSpeed      = 20,    -- kecepatan minimum tetap maju walau throttle 0% (biar tetap kaya jet, gak berhenti total)
-	AccelRate     = 40,    -- seberapa cepat speed naik menuju target (momentum akselerasi)
-	DecelRate     = 30,    -- seberapa cepat speed turun menuju target (momentum deselerasi)
+	AccelRate     = 45,    -- seberapa cepat speed naik menuju target (momentum akselerasi)
+	DecelRate     = 35,    -- seberapa cepat speed turun menuju target (momentum deselerasi)
 
 	-- Boost
 	BoostSpeedBonus = 70,
@@ -27,9 +27,9 @@ local Config = {
 	BoostCooldown   = 7,
 
 	-- Rotasi
-	PitchRate = 50,   -- derajat/detik, joystick kanan (atas/bawah)
-	YawRate   = 60,   -- derajat/detik, joystick kanan (kiri/kanan)
-	RollRate  = 150,  -- derajat/detik, tombol roll kiri/kanan
+	PitchRate = 60,   -- derajat/detik, joystick kanan (atas/bawah)
+	YawRate   = 70,   -- derajat/detik, joystick kanan (kiri/kanan)
+	RollRate  = 160,  -- derajat/detik, tombol roll kiri/kanan
 
 	AngularAcceleration = 260, -- makin besar = makin responsif
 
